@@ -1,87 +1,95 @@
 import datetime
+import os
+import sqlite3
 import streamlit as st
 
 # Page Configuration for Mobile
 st.set_page_config(page_title="Corporate Quest", page_icon="⚔️", layout="centered")
 
-# Initialize Connection to Streamlit's built-in persistent storage (SQLite database)
-conn = st.connection("sql", type="sql")
-
-# Create tables if they don't exist yet
-with conn.session as s:
-    s.execute(
-        "CREATE TABLE IF NOT EXISTS user_stats (id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER, gold INTEGER, streak INTEGER, last_daily_date TEXT)"
-    )
-    s.execute(
-        "CREATE TABLE IF NOT EXISTS quest_history (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, quest_type TEXT, xp_earned INTEGER, gold_earned INTEGER)"
-    )
-    s.execute(
-        "CREATE TABLE IF NOT EXISTS stat_tree (name TEXT PRIMARY KEY, points INTEGER)"
-    )
-    s.commit()
+# Database setup (creates a local file 'quest_data.db' automatically)
+DB_FILE = "quest_data.db"
 
 
-# Load or Initialize User Data
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS user_stats 
+                      (id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER, gold INTEGER, streak INTEGER, last_daily_date TEXT)"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS quest_history 
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, quest_type TEXT, xp_earned INTEGER, gold_earned INTEGER)"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS stat_tree 
+                      (name TEXT PRIMARY KEY, points INTEGER)"""
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# Helper functions for database interaction
 def load_data():
-    df_user = conn.query("SELECT * FROM user_stats WHERE id = 1", ttl=0)
-    if df_user.empty:
-        with conn.session as s:
-            s.execute(
-                "INSERT INTO user_stats (id, xp, level, gold, streak, last_daily_date) VALUES (1, 0, 1, 0, 0, '')"
-            )
-            for stat in ["Diplomacy", "Intellect", "Execution"]:
-                s.execute(
-                    "INSERT OR IGNORE INTO stat_tree (name, points) VALUES (:name, 0)",
-                    {"name": stat},
-                )
-            s.commit()
-        return 0, 1, 0, 0, ""
-    else:
-        row = df_user.iloc[0]
-        return (
-            int(row["xp"]),
-            int(row["level"]),
-            int(row["gold"]),
-            int(row["streak"]),
-            str(row["last_daily_date"]),
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT xp, level, gold, streak, last_daily_date FROM user_stats WHERE id = 1")
+    row = cursor.fetchone()
+    if not row:
+        # Initialize default user stats if empty
+        cursor.execute(
+            "INSERT INTO user_stats (id, xp, level, gold, streak, last_daily_date) VALUES (1, 0, 1, 0, 0, '')"
         )
+        for stat in ["Diplomacy", "Intellect", "Execution"]:
+            cursor.execute(
+                "INSERT OR IGNORE INTO stat_tree (name, points) VALUES (?, 0)", (stat,)
+            )
+        conn.commit()
+        xp, level, gold, streak, last_daily_date = 0, 1, 0, 0, ""
+    else:
+        xp, level, gold, streak, last_daily_date = row
+    conn.close()
+    return xp, level, gold, streak, last_daily_date
 
 
 def update_user(xp, level, gold, streak, last_daily_date):
-    with conn.session as s:
-        s.execute(
-            "UPDATE user_stats SET xp=:xp, level=:level, gold=:gold, streak=:streak, last_daily_date=:last_daily WHERE id=1",
-            {
-                "xp": xp,
-                "level": level,
-                "gold": gold,
-                "streak": streak,
-                "last_daily": last_daily_date,
-            },
-        )
-        s.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE user_stats SET xp=?, level=?, gold=?, streak=?, last_daily_date=? WHERE id=1""",
+        (xp, level, gold, streak, last_daily_date),
+    )
+    conn.commit()
+    conn.close()
 
 
 def log_quest(quest_type, xp, gold):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    with conn.session as s:
-        s.execute(
-            "INSERT INTO quest_history (timestamp, quest_type, xp_earned, gold_earned) VALUES (:ts, :qt, :xp, :gold)",
-            {"ts": now, "qt": quest_type, "xp": xp, "gold": gold},
-        )
-        s.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO quest_history (timestamp, quest_type, xp_earned, gold_earned) VALUES (?, ?, ?, ?)""",
+        (now, quest_type, xp, gold),
+    )
+    conn.commit()
+    conn.close()
 
 
 def update_stat(stat_name, amount):
-    with conn.session as s:
-        s.execute(
-            "UPDATE stat_tree SET points = points + :amt WHERE name = :name",
-            {"amt": amount, "name": stat_name},
-        )
-        s.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        """UPDATE stat_tree SET points = points + ? WHERE name = ?""",
+        (amount, stat_name),
+    )
+    conn.commit()
+    conn.close()
 
 
-# Load current stats into session state variables
+# Load current stats into session variables
 xp, level, gold, streak, last_daily_date = load_data()
 xp_needed = level * 300
 
@@ -179,9 +187,14 @@ st.divider()
 
 # Character Stats Display
 st.subheader("📊 Stat Tree")
-df_stats = conn.query("SELECT * FROM stat_tree", ttl=0)
-for index, row in df_stats.iterrows():
-    st.text(f"{row['name']}: {row['points']} pts")
+conn_s = sqlite3.connect(DB_FILE)
+cursor_s = conn_s.cursor()
+cursor_s.execute("SELECT name, points FROM stat_tree")
+stats_rows = cursor_s.fetchall()
+conn_s.close()
+
+for name, points in stats_rows:
+    st.text(f"{name}: {points} pts")
 
 st.divider()
 
@@ -208,11 +221,20 @@ st.divider()
 
 # History Log Audit Trail
 st.subheader("📜 Quest History")
-df_history = conn.query(
-    "SELECT timestamp, quest_type, xp_earned, gold_earned FROM quest_history ORDER BY id DESC LIMIT 10",
-    ttl=0,
+conn_h = sqlite3.connect(DB_FILE)
+cursor_h = conn_h.cursor()
+cursor_h.execute(
+    "SELECT timestamp, quest_type, xp_earned, gold_earned FROM quest_history ORDER BY id DESC LIMIT 10"
 )
-if not df_history.empty:
+history_rows = cursor_h.fetchall()
+conn_h.close()
+
+if history_rows:
+    import pandas as pd
+
+    df_history = pd.DataFrame(
+        history_rows, columns=["Timestamp", "Quest Type", "XP Earned", "Gold Earned"]
+    )
     st.dataframe(df_history, use_container_width=True, hide_index=True)
 else:
     st.text("No quests completed yet. Time to start grinding!")
